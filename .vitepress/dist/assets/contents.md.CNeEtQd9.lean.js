@@ -1,0 +1,1 @@
+import{_ as e,o as l,c as r,a2 as t}from"./chunks/framework.DnrXFDHb.js";const f=JSON.parse('{"title":"目录","description":"","frontmatter":{},"headers":[],"relativePath":"contents.md","filePath":"contents.md"}'),i={name:"contents.md"};function h(s,a,o,n,p,c){return l(),r("div",null,[...a[0]||(a[0]=[t("",18)])])}const d=e(i,[["render",h]]);export{f as __pageData,d as default};

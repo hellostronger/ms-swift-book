@@ -1,0 +1,31 @@
+---
+layout: home
+hero:
+  name: "ms-swift 源码解析"
+  text: "大模型微调框架深度剖析"
+  tagline: "从损失函数到 RLHF 算法，从超参数到训练架构，全方位理解 ms-swift 的设计哲学与实现细节"
+  actions:
+    - theme: brand
+      text: 开始阅读
+      link: /chapters/01-what-is-ms-swift
+    - theme: alt
+      text: 查看目录
+      link: /contents
+    - theme: alt
+      text: GitHub 源码
+      link: https://github.com/modelscope/ms-swift
+
+features:
+  - icon: 🎯
+    title: 损失函数体系
+    details: 深度解析 7 种损失函数（CrossEntropy、Contrastive、InfoNCE、Pointwise/Listwise Reranker），涵盖嵌入学习、重排任务、Agent 训练等场景
+  - icon: ⚡
+    title: RLHF 算法全覆盖
+    details: 详解 DPO 的 14 种变体、CPO/SimPO、ORPO、KTO、PPO、GRPO、GKD 等对齐算法的实现原理与超参数配置
+  - icon: 🔧
+    title: 超参数完全指南
+    details: 100+ 个超参数的作用、默认值、使用场景，包括 beta、temperature、loss_type、reward_funcs 等核心参数
+  - icon: 🏗️
+    title: 架构设计剖析
+    details: 从参数系统、模型注册、模板引擎到训练流水线，揭示 ms-swift 的分层架构与扩展机制
+---
