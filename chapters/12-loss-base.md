@@ -110,12 +110,20 @@ swift sft --loss_type my_loss ...
 
 ## 12.6 损失函数与 Task Type 的关系
 
-| Task Type | 默认损失 | 可选损失 | 输出格式 |
-|-----------|---------|---------|---------|
-| causal_lm | CrossEntropy | - | logits [B, S, V] |
-| embedding | InfoNCE | Cosine, Contrastive | last_hidden_state [B, D] |
-| reranker | Pointwise | Listwise | logits [B, 1] |
-| generative_reranker | Listwise | - | logits [B, S] |
+`--task_type` 与 `--loss_type` 是**两个正交开关**：`task_type` 决定走哪条数据管线和评估指标，`loss_type` 决定用哪个损失函数。二者没有强制绑定，框架也不校验组合合法性——**配错了要到运行时才会报错**，因此对照下表使用：
+
+| Task Type | 数据形态 | 常用 loss_type | 模型前向输出 | 默认评估指标 |
+|-----------|---------|---------------|-------------|------------|
+| `causal_lm` | 单条 messages | `cross_entropy` | logits `[B, S, V]` | `nlg` / `acc` |
+| `seq_cls` | messages + label | `loss_type=None`（走模型自带 loss） | logits `[B, num_labels]` | `acc` |
+| `embedding` | anchor + positive（±negative） | `infonce` | `last_hidden_state` `[B, D]` | `infonce` 或 `paired` |
+| `reranker` | query + positive + negative | `pointwise_reranker` | logits `[B, 1]` | `reranker` |
+| `generative_reranker` | query + positive + negative | `pointwise_reranker` | logits `[B, S]` → 取末位 | `reranker` |
+
+两点补充：
+
+- **`embedding` 家族有 4 个可选损失**（`infonce` / `cosine_similarity` / `contrastive` / `online_contrastive`），其中只有 `infonce` 的评估指标会自动切到 `infonce`，其余三个共用 `paired`。详见[第 14 章](/chapters/14-loss-embedding)。
+- **`generative_reranker` 的 logits 会被二次加工**：`RerankerTrainer` 先取最后一个有效 token 的位置，再由 `get_generative_reranker_logits` 把词表投影压缩成 `P(yes) - P(no)` 的标量差。详见[第 15 章](/chapters/15-loss-reranker)。
 
 ## 12.7 num_items_in_batch 的作用
 

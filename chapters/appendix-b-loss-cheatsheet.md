@@ -67,9 +67,10 @@ loss = 0.5 * (y * d^2 + (1-y) * max(0, margin-d)^2)
 ```
 negs = distances[labels == 0]
 poss = distances[labels == 1]
-hard_negs = negs[negs < max(poss)]
-hard_poss = poss[poss > min(negs)]
-loss = sum(hard_poss^2) + sum(relu(margin - hard_negs)^2)
+# 筛选阈值随 batch 动态变化
+hard_negs = negs[negs < (poss.max() if len(poss)>1 else negs.mean())]
+hard_poss = poss[poss > (negs.min() if len(negs)>1 else poss.mean())]
+loss = sum(hard_poss^2) + sum(relu(margin - hard_negs)^2)   # 注意是 sum 不是 mean
 ```
 
 **适用场景**：
@@ -79,6 +80,10 @@ loss = sum(hard_poss^2) + sum(relu(margin - hard_negs)^2)
 **超参数**：
 - `margin`：0.5（硬编码）
 
+> ⚠️ **两个坑**：
+> 1. 返回值用 `.sum()` 而非 `.mean()`，**loss 尺度随 batch size 和当步难例数量线性变化**
+> 2. 筛选阈值 `poss.max()` / `negs.min()` 是 batch 内统计量，每步参与的样本数不同，loss 会有额外抖动
+
 ---
 
 ### InfoNCELoss
@@ -87,22 +92,29 @@ loss = sum(hard_poss^2) + sum(relu(margin - hard_negs)^2)
 
 **公式**：
 ```
-sim_matrix = (sentences @ sentences.T) / temperature
-loss = CrossEntropy(sim_matrix, labels)
+qd_matrix = queries @ docs_all.T / temperature   # [B, B*(neg+1)]
+# target 是每组自己正样本的起始列
+labels = tensor(range(0, B*(neg+1), neg+1))
+loss = CrossEntropy(qd_matrix, labels)
 ```
 
 **适用场景**：
 - 检索任务（如 MS MARCO）
-- 嵌入模型训练（如 BGE、E5）
+- 嵌入模型训练（如 BGE、E5、Qwen3-Embedding）
+- **唯一支持跨 GPU 负样本扩展**的损失
+
+**数据格式**：`messages`（anchor）+ `positive_messages`，`negative_messages` 可选。`label` 字段仅用作**分组分隔符**，不表达相似度。
 
 **超参数**（环境变量）：
 - `INFONCE_TEMPERATURE`：0.1（温度参数）
-- `INFONCE_USE_BATCH`：True（是否使用批内负样本）
-- `INFONCE_HARD_NEGATIVES`：None（硬负样本数量）
-- `INFONCE_MASK_FAKE_NEGATIVE`：False（是否屏蔽假负样本）
+- `INFONCE_USE_BATCH`：True（True=批内负样本 / False=仅样本自带负例）
+- `INFONCE_HARD_NEGATIVES`：None（固定每条样本的负例数；设了才能走批量矩阵乘法）
+- `INFONCE_MASK_FAKE_NEGATIVE`：False（屏蔽相似度 > `正例得分 + margin` 的假负例）
 - `INFONCE_FAKE_NEG_MARGIN`：0.1（假负样本阈值）
-- `INFONCE_INCLUDE_QQ`：False（是否加入 q-q 相似度）
-- `INFONCE_INCLUDE_DD`：False（是否加入 d-d 相似度）
+- `INFONCE_INCLUDE_QQ`：False（把 q-q 相似度加入分母，对角线置 -inf）
+- `INFONCE_INCLUDE_DD`：False（把 d-d 相似度加入分母，逐行屏蔽自身正例列）
+
+> 注意：`INFONCE_USE_BATCH=True` 时需配合 `--dataloader_drop_last true`，否则评估阶段跨卡 gather 会因 batch 不齐报错。
 
 ---
 
@@ -114,12 +126,14 @@ loss = CrossEntropy(sim_matrix, labels)
 
 **公式**：
 ```
-loss = BCEWithLogits(logits, labels)
+logits = outputs.logits.squeeze(1)      # [B]
+loss = BCEWithLogits(logits, labels)    # 内部含 sigmoid
 ```
 
 **适用场景**：
 - 简单排序任务
 - 二分类场景
+- 数据量大、显存受限
 
 **超参数**：
 - 无特殊超参数
@@ -132,19 +146,31 @@ loss = BCEWithLogits(logits, labels)
 
 **公式**：
 ```
+# 按 labels==1 的位置切分组，每组以正样本开头
 for each group:
-    scaled_logits = logits / temperature
-    loss += CrossEntropy(scaled_logits, target=0)
+    scaled_logits = group_logits / temperature
+    loss += CrossEntropy(scaled_logits, target=0)   # 正样本应在组内排第一
 loss = mean(losses)
 ```
 
 **适用场景**：
 - 精确排序
 - 考虑文档间相对关系
+- 有充足负例（负例难度直接决定效果）
+
+**数据格式**（由 `_reranker_data_collator` 生成）：
+```
+labels = [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, ...]
+         └── 组1: 1正7负 ──┘└── 组2: 1正7负 ──┘
+```
 
 **超参数**（环境变量）：
 - `LISTWISE_RERANKER_TEMPERATURE`：1.0（温度参数）
-- `LISTWISE_RERANKER_MIN_GROUP_SIZE`：2（最小组大小）
+- `LISTWISE_RERANKER_MIN_GROUP_SIZE`：2（小于此值的组跳过不计算）
+- `MAX_POSITIVE_SAMPLES`：1（每条数据抽取的正样本数）
+- `MAX_NEGATIVE_SAMPLES`：7（每组负样本数）
+
+> ⚠️ **显存坑**：一条原始数据会被展开成 `MAX_POSITIVE_SAMPLES × (1 + MAX_NEGATIVE_SAMPLES)` 条，默认配置下 `per_device_train_batch_size` 要按 1/8 折算。
 
 ---
 
@@ -358,11 +384,14 @@ loss = jsd + sft_alpha * sft_loss
 
 | 任务类型 | 推荐损失 | 说明 |
 |---------|---------|------|
-| SFT | CrossEntropy | 标准语言模型损失 |
+| SFT | cross_entropy | 标准语言模型损失 |
 | DPO | sigmoid | 最稳定的 DPO 变体 |
 | CPO/SimPO | cpo/simpo | 无需参考模型 |
-| 嵌入学习 | InfoNCE | 支持批内负样本 |
-| 重排 | ListwiseReranker | 考虑文档间关系 |
+| 嵌入-检索 | infonce | 批内/跨卡负样本，检索首选 |
+| 嵌入-STS 回归 | cosine_similarity | 只适合相似度打分，不适合建索引 |
+| 嵌入-二分类 | contrastive / online_contrastive | 复现 GTE-BERT 类训练配方时用 |
+| 重排 | listwise_reranker | 追求 nDCG；显存够时优于 pointwise |
+| 重排（显存受限） | pointwise_reranker | 效率高，评估仍用 MRR/nDCG |
 | 知识蒸馏 | JSD | GKD 标准损失 |
 
 ### 按场景选择
@@ -375,6 +404,32 @@ loss = jsd + sft_alpha * sft_loss
 | 噪声数据 | DPO robust | 标签平滑 |
 | 检索任务 | InfoNCE | 批内负样本 |
 | 精确排序 | ListwiseReranker | 列表级对比 |
+| 负例标注有噪声 | InfoNCE + `MASK_FAKE_NEGATIVE=True` | 避免把相关文档当负例 |
+| 需要多档位向量 | InfoNCE + `--mrl_dims` | Matryoshka，一次训练多维度 |
+| batch 太小负例不足 | InfoNCE + 加大 batch / 多卡训练 | 负例池 = batch × world_size |
+
+### embedding 损失决策树
+
+```
+数据里有什么标签？
+├─ 浮点相似度分数（STS / stsb）
+│  └─ cosine_similarity        ← 学到的是打分能力，不能建向量索引
+├─ 0 / 1 二元标签
+│  ├─ 普通对比     → contrastive
+│  └─ 聚焦难例     → online_contrastive
+└─ 只有 (query, positive)，无负例标注
+   └─ infonce                    ← 绝大多数实际场景
+      ├─ 负例不够  → 加大 batch_size / 多卡
+      ├─ 有难负例  → 加 negative_messages + USE_BATCH=False + HARD_NEGATIVES
+      └─ 标注有噪声 → MASK_FAKE_NEGATIVE=True
+```
+
+### 两个高频踩坑
+
+| 坑 | 原因 | 解决 |
+|---|------|------|
+| `contrastive` 系列结果异常 | `_parse_pair_sentence` 按奇偶下标配对，数据带了 `negative_messages` 会错位 | 这三种损失的数据**不要写** `negative_messages` |
+| `infonce` 评估时 gather 报错 | `USE_BATCH=True` 依赖 batch 内足量样本 | 加 `--dataloader_drop_last true` |
 
 ---
 
@@ -383,12 +438,12 @@ loss = jsd + sft_alpha * sft_loss
 | 损失函数 | 计算复杂度 | 显存占用 | 训练速度 | 效果 |
 |---------|-----------|---------|---------|------|
 | CrossEntropy | 低 | 低 | 快 | 基线 |
-| CosineSimilarity | 低 | 低 | 快 | 回归任务 |
-| Contrastive | 中 | 中 | 中 | 基线 |
-| OnlineContrastive | 中 | 中 | 中 | 困难样本 |
-| InfoNCE | 高 | 高 | 慢 | 最佳 |
+| CosineSimilarity | 低 | 低 | 快 | 回归，无法建索引 |
+| Contrastive | 中 | 低 | 中 | 基线 |
+| OnlineContrastive | 中 | 低 | 中 | 困难样本（loss 尺度依赖 batch） |
+| InfoNCE | 高 | 高（负例池 × world_size） | 慢 | 检索最佳 |
 | PointwiseReranker | 低 | 低 | 快 | 简单排序 |
-| ListwiseReranker | 中 | 中 | 中 | 精确排序 |
+| ListwiseReranker | 中 | 中（batch × 8） | 中 | 精确排序 |
 | DPO sigmoid | 中 | 中（2倍模型） | 中 | 好 |
 | DPO ipo | 中 | 中 | 中 | 好 |
 | JSD | 中 | 中（2倍模型） | 中 | 好 |
